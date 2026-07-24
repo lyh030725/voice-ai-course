@@ -1,97 +1,71 @@
-# M2 — "Dispatcher": tools, a flag file, and a worker with its own brain
+# M2 — KINGO VOICE TA: memory, PDF-first answers, trusted web fallback
 
-**Due before week 3.** Definition of done: tell the agent "my heater is
-broken, unit 4B, it's freezing" → it speaks a confirmation with a ticket id →
-an email appears in `outbox/` within seconds → ask "what's the status of my
-ticket?" → it answers correctly. Graded on behavior, not style.
+단일 학생용 음성 조교입니다. 대화 중 드러난 취약 개념을 자동 저장하고,
+다음 질문에서 다시 불러와 힌트와 후속 질문을 개인화합니다.
 
-This week your agent stops being all talk. Week 1's cascade is **provided**
-(it was your homework); what you build is the tool belt and the worker.
+## Tool 사용 조건
 
-## What's in the box
+| Tool | 호출 조건 |
+|---|---|
+| `save_weak_concept` | 학생이 학습 질문을 하거나 혼란·불완전한 이해를 보이면 동의 없이 자동 호출 |
+| `recall_weak_concepts` | 모든 실질적인 학습 질문에 답하기 전에 호출 |
+| `search_course_materials` | 사실 기반 학습 질문에 답하기 전에 항상 먼저 호출 |
+| `search_trusted_web` | 이전 tool round에서 PDF를 검색했고 근거가 없거나 부족할 때만 호출 |
 
-| File | Status | What it is |
-|------|--------|------------|
-| `server.py` | **you edit 3 marked spots** | the cascade + memory, provided; you write the tool schemas, the tool functions, and the tool-call loop |
-| `worker.py` | **you edit 1 marked spot** | watches `tickets/inbox.jsonl`, emails work orders; you upgrade `draft_email()` from a template to a Grok call |
-| `static/index.html` | provided | week 1's page + tool chips + a "new call" button |
-| `.env.example` | copy to `.env` | same values as week 1 (+ optional worker settings) |
+PDF는 저장소 루트의 `srcs/*.pdf`에서 페이지 단위로 검색합니다. PDF 근거를
+사용하면 파일명과 페이지를 답변에 표시합니다.
 
-## The architecture you're building
+외부 검색은 다음 신뢰 도메인으로 제한됩니다.
 
-```
-you speak ──> STT ──> Grok + TOOLS ──> TTS ──> you hear
-                        │ file_maintenance_ticket()      (fast: append one line)
-                        ▼
-              tickets/inbox.jsonl  ◄── the flag file / job queue
-                        │
-                        ▼ (polled every 2 s, separate process)
-                    worker.py ──> Grok (its own prompt) ──> outbox/T-1042.eml
-```
+- `skku.edu`
+- `arxiv.org`
+- `aclanthology.org`
+- `proceedings.neurips.cc`
+- `jmlr.org`
 
-Two LLMs, two processes, decoupled by a text file. The voice path stays fast
-because the tool only *records the intent*; the slow work (drafting, sending)
-happens where nobody is waiting on hold.
+외부 검색 결과에 신뢰 도메인의 URL이 없으면 답변 근거로 사용하지 않습니다.
+사용한 URL은 최종 답변에 자동으로 붙고 `sources/web-search.jsonl`에도 기록됩니다.
 
-## Setup & run (three terminals)
+## 저장 파일
+
+- `memory/weak_concepts.jsonl`: 자동 저장된 학생 취약 개념
+- `memory/followups/*.txt`: 선택적 로컬 워커가 만든 다음 대화용 질문
+- `sources/web-search.jsonl`: 외부 검색 질의·답변·출처 감사 로그
+
+대화 문맥 `HISTORY`는 서버 메모리에만 있으므로 서버 재시작 또는 화면의
+새 대화 버튼으로 초기화됩니다. 취약 개념 JSONL은 재시작 후에도 유지됩니다.
+
+## 설치 및 실행
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+cd /home/student/voice-ai-course/starter-code/week2-dispatcher
+source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                      # same key/model/voice as week 1
-
-uvicorn server:app --reload --port 8000   # terminal 1 — the agent
-python worker.py                          # terminal 2 — the worker
-tail -f tickets/inbox.jsonl               # terminal 3 — watch the flag file
+uvicorn server:app --reload --port 8000
 ```
 
-Open **http://localhost:8000** (localhost only, as always).
+브라우저에서 <http://localhost:8000>을 엽니다.
 
-## The recommended path
+API 없이 로컬 tool과 worker를 검증하려면 다음을 실행합니다.
 
-1. **Step 0 — it already talks.** As shipped, the server is week 1's Talkbox
-   *with conversation memory* and the worker runs in **template mode** (no
-   LLM). Prove both: have a two-turn conversation, then append a fake ticket
-   and watch the worker email it:
-   ```bash
-   mkdir -p tickets && echo '{"id":"T-999","unit":"1A","problem":"test","urgency":"routine","filed_at":0}' >> tickets/inbox.jsonl
-   # worker terminal: "EMAIL SENT -> outbox/T-999.eml"
-   ```
-2. **HOMEWORK 1 — schemas.** `file_maintenance_ticket`'s schema is written
-   for you (read it line by line — descriptions are prompts). Write the
-   schema for `check_ticket_status` yourself.
-3. **HOMEWORK 2 — the functions.** Both are a few lines of file I/O. Rules:
-   return in <100 ms, return terse JSON strings, validate arguments.
-4. **HOMEWORK 3 — the loop.** Replace `think()`'s single call with the
-   tool-call loop (skeleton in comments). The two classic bugs, so you
-   recognize them: forgetting to append the assistant's tool-call message
-   before the tool result, and forgetting `json.loads` on the arguments.
-5. **HOMEWORK 4 — the worker's brain.** Upgrade `draft_email()` from the
-   template to a one-shot Grok call with its own system prompt.
+```bash
+VOICE_AI_SKIP_DOTENV=1 .venv/bin/python -m unittest discover -s tests -v
+```
 
-## Deliverables
+로컬 후속 질문 파일도 생성하려면 두 번째 터미널에서 실행합니다. 이 워커는
+학생 메모리를 외부 서비스로 전송하지 않습니다.
 
-- The conversation transcript, the ticket line from `inbox.jsonl`, and the
-  generated email — for one **urgent** and one **routine** request
-- Conceptual: why must `file_maintenance_ticket` return *before* the email is
-  drafted? Trace what the caller hears if it didn't.
-- Conceptual: your agent filed the same heater ticket twice in one call.
-  What probably went wrong — the schema, the prompt, or the function?
+```bash
+cd /home/student/voice-ai-course/starter-code/week2-dispatcher
+source .venv/bin/activate
+python worker.py
+```
 
-**Stretch:** real SMTP delivery (`send_email()` is the only function to
-touch); conditional routing (emergency → email now, routine → daily digest);
-a third tool of your choosing.
+웹 검색은 xAI Responses API의 서버 측 `web_search`를 사용하며 기본 모델은
+`grok-4.5`입니다. 필요하면 환경 변수 `WEB_SEARCH_MODEL`로 변경할 수 있습니다.
 
-## Common failures
+## 테스트 예시
 
-- **400 from chat completions after a tool call** — you appended the
-  `role:"tool"` result without the assistant's tool-call message before it.
-- **`TypeError` in your tool function** — `tc.function.arguments` is a JSON
-  *string*; parse it.
-- **Worker re-emails everything on restart** — you marked processed in
-  memory, not in `tickets/processed.txt`.
-- **Agent reads JSON aloud** — your system prompt needs "never read raw
-  JSON; confirm naturally in words."
-- **Agent invents a unit number** — tighten the schema description and the
-  system prompt ("ask for anything missing rather than guessing"), and
-  validate in the function.
+1. “Self-Attention에서 Query와 Key를 왜 곱하는지 모르겠어.”
+2. “아까 내가 어려워했던 개념과 연결해서 다시 설명해줘.”
+3. PDF에 없는 최신 내용을 질문해 PDF 검색 후 신뢰 웹 검색과 URL 표시 확인

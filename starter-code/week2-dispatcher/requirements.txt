@@ -4,3 +4,4 @@ uvicorn[standard]
 openai          # Grok chat via the OpenAI SDK (base_url=https://api.x.ai/v1)
 python-dotenv
 requests        # xAI's native STT/TTS endpoints (/v1/stt, /v1/tts)
+pypdf          # page-level search over course PDFs in ../../srcs
