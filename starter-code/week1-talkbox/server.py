@@ -143,41 +143,80 @@ class AgentReply:
 #
 #  * Keep the system prompt SHORT and tell Grok it is speaking out loud:
 #    answers get read by TTS, so two sentences beat two paragraphs.
-# --------------------------------------------------------------------------
+# ------------=--------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are a friendly voice assistant. Your answers are spoken aloud, "
-    "so reply in one to three short conversational sentences, with no "
-    "markdown, lists, or code."
+    "You are Kingo Voice TA, a friendly voice learning assistant for "
+    "Sungkyunkwan University students. Reply in the language the student "
+    "uses, including Korean for Korean questions. Since every reply is read "
+    "aloud , natural sentences without markdown, "
+    "lists, headings, or code blocks. *For conceptual questions, do not "
+    "immediately give a long answer; when useful, ask one brief guiding "
+    "question that helps the student think*. *If the student clearly asks for "
+    "an explanation or does not know the answer, explain the core concept "
+    "concisely*. Never claim to have checked lecture notes, professor "
+    "materials, or other sources that were not provided. Do not imply that "
+    "you have RAG or uploaded course materials. make every response easy to speak aloud."
 )
 
 
 async def answer(audio: bytes, mime: str, timer: StageTimer) -> AgentReply:
-    # ---- Step 0: the echo (delete once your cascade works) -----------------
-    return AgentReply(audio=audio, mime=mime)
-
     # ---- Steps 1-3: the cascade (implement STT -> Grok -> TTS) -------------
-    #
-    # Only the Grok (chat) step is OpenAI-SDK compatible. xAI's STT and TTS are
-    # native xAI REST endpoints — call them directly with `requests` (already
-    # imported). Full reference implementation: solution/server.py.
-    #
-    # client = xai_client()
-    #
-    # with timer.stage("stt"):
-    #     # POST https://api.x.ai/v1/stt  (multipart form-data, field "file")
-    #     # -> transcript from resp.json()["text"]
-    #
-    # with timer.stage("llm"):
-    #     # client.chat.completions.create(...)  — the OpenAI SDK -> reply_text
-    #
-    # with timer.stage("tts"):
-    #     # POST https://api.x.ai/v1/tts  (JSON: text, voice_id, language)
-    #     # -> reply audio bytes (mp3) from resp.content
-    #
-    # return AgentReply(audio=reply_audio, mime="audio/mpeg",
-    #                   transcript=transcript, reply_text=reply_text)
-    
+    api_key = require_env("XAI_API_KEY")
+    auth_headers = {"Authorization": f"Bearer {api_key}"}
+
+    with timer.stage("stt"):
+        stt_response = requests.post(
+            "https://api.x.ai/v1/stt",
+            headers=auth_headers,
+            files={
+                "file": (
+                    f"audio.{ext_for(mime)}",
+                    audio,
+                    mime,
+                )
+            },
+        )
+        stt_response.raise_for_status()
+        transcript = (stt_response.json().get("text") or "").strip()
+
+    if not transcript:
+        raise RuntimeError(
+            "음성을 인식하지 못했습니다. 버튼을 누른 채 다시 말씀해 주세요."
+        )
+    log.info("transcript: %s", transcript)
+
+    with timer.stage("llm"):
+        completion = xai_client().chat.completions.create(
+            model=require_env("CHAT_MODEL"),
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": transcript},
+            ],
+        )
+        reply_text = (completion.choices[0].message.content or "").strip()
+        if not reply_text:
+            reply_text = "죄송해요. 답변을 만들지 못했어요. 질문을 다시 말씀해 주세요."
+
+    with timer.stage("tts"):
+        tts_response = requests.post(
+            "https://api.x.ai/v1/tts",
+            headers=auth_headers,
+            json={
+                "text": reply_text,
+                "voice_id": require_env("TTS_VOICE"),
+                "language": "auto",
+            },
+        )
+        tts_response.raise_for_status()
+        reply_audio = tts_response.content
+
+    return AgentReply(
+        audio=reply_audio,
+        mime="audio/mpeg",
+        transcript=transcript,
+        reply_text=reply_text,
+    )
 
 
 def ext_for(mime: str) -> str:

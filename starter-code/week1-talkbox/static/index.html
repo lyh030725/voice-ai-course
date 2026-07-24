@@ -17,7 +17,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>M1 — Talkbox</title>
+<title>Kingo Voice TA</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #181b24; --text: #e8eaf0; --dim: #8b90a0;
@@ -58,10 +58,10 @@
 </style>
 </head>
 <body>
-  <h1>M1 — Talkbox</h1>
+  <h1>Kingo Voice TA</h1>
   <div id="status">Loading…</div>
 
-  <button id="ptt" disabled>HOLD<br>TO TALK</button>
+  <button id="ptt" disabled>누르고<br>말하기</button>
   <div class="key">
     latency: <i style="background:var(--stt)"></i>STT
     <i style="background:var(--llm)"></i>Grok
@@ -101,7 +101,7 @@ async function init() {
   recorder.onstop = sendClip;
 
   $("ptt").disabled = false;
-  status("Hold the button, ask a question, release.");
+  status("버튼을 누른 채 질문하고, 말이 끝나면 놓으세요.");
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ function startRec() {
   chunks = [];
   recorder.start();
   $("ptt").classList.add("recording");
-  status("Recording… release to send.");
+  status("녹음 중… 전송하려면 버튼을 놓으세요.");
 }
 function stopRec() {
   if (!recorder || recorder.state !== "recording") return;
@@ -159,7 +159,7 @@ async function sendClip() {
     addTurn({ error: String(e) });
   } finally {
     $("ptt").disabled = false;
-    status("Hold the button, ask a question, release.");
+    status("버튼을 누른 채 질문하고, 말이 끝나면 놓으세요.");
   }
 }
 
@@ -181,7 +181,7 @@ function addTurn({ transcript, reply, timings = {}, roundTrip, error }) {
     const bot = reply ?? "(echo)";
     div.innerHTML = `
       <div class="who">You</div><div></div>
-      <div class="who" style="margin-top:.5rem">Agent</div><div></div>
+      <div class="who" style="margin-top:.5rem">Kingo Voice TA</div><div></div>
       <div class="lat"></div><div class="latlabel"></div>`;
     const texts = div.querySelectorAll("div:not([class])");
     texts[0].textContent = you;

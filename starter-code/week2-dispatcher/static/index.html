@@ -1,20 +1,14 @@
 <!doctype html>
 <!--
-  M2 "Dispatcher" — the browser side. PROVIDED, and almost identical to week 1
-  (that's deliberate: this week is a server-side week). Two additions:
-
-    * each turn shows CHIPS for the tools the model called (X-Tools header) —
-      when your agent files a ticket, you SEE the tool fire
-    * a "new call" button that clears the server's conversation memory
-
-  Watch the latency bar when a tool fires: the Grok segment roughly doubles,
-  because a tool call costs a second model round trip (Lecture 2, Slide 20).
+  KINGO VOICE TA browser interface. Tool chips expose calls made during each
+  turn. Starting a new conversation clears chat history but preserves saved
+  weak concepts.
 -->
-<html lang="en">
+<html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>M2 — Dispatcher</title>
+<title>KINGO VOICE TA</title>
 <style>
   :root {
     --bg: #0f1117; --panel: #181b24; --text: #e8eaf0; --dim: #8b90a0;
@@ -68,14 +62,14 @@
 </style>
 </head>
 <body>
-  <h1>M2 — Dispatcher</h1>
-  <div id="status">Loading…</div>
+  <h1>KINGO VOICE TA</h1>
+  <div id="status">불러오는 중…</div>
 
-  <button id="ptt" disabled>HOLD<br>TO TALK</button>
-  <button id="reset" title="Clear the server's conversation memory">✕ new call</button>
+  <button id="ptt" disabled>누르고<br>말하기</button>
+  <button id="reset" title="현재 대화 기록만 지웁니다">✕ 새 대화</button>
   <div class="key">
-    latency: <i style="background:var(--stt)"></i>STT
-    <i style="background:var(--llm)"></i>Grok (incl. tools)
+    지연 시간: <i style="background:var(--stt)"></i>STT
+    <i style="background:var(--llm)"></i>Grok 및 tools
     <i style="background:var(--tts)"></i>TTS
     <i style="background:#555b6e"></i>network/other
   </div>
@@ -95,7 +89,7 @@ async function init() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    status("Mic permission denied (or not on localhost/HTTPS): " + e.message);
+    status("마이크를 사용할 수 없습니다. localhost/HTTPS와 권한을 확인하세요: " + e.message);
     return;
   }
   const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
@@ -105,7 +99,7 @@ async function init() {
   recorder.onstop = sendClip;
 
   $("ptt").disabled = false;
-  status("Hold the button and report a problem — try a broken heater.");
+  status("버튼을 누른 채 학습 질문을 말하고, 끝나면 놓으세요.");
 }
 
 function startRec() {
@@ -113,7 +107,7 @@ function startRec() {
   chunks = [];
   recorder.start();
   $("ptt").classList.add("recording");
-  status("Recording… release to send.");
+  status("녹음 중… 전송하려면 버튼을 놓으세요.");
 }
 function stopRec() {
   if (!recorder || recorder.state !== "recording") return;
@@ -130,14 +124,14 @@ document.addEventListener("keyup", (e) => { if (e.code === "Space") stopRec(); }
 $("reset").addEventListener("click", async () => {
   await fetch("/reset", { method: "POST" });
   $("log").innerHTML = "";
-  status("New call — memory cleared.");
+  status("새 대화를 시작합니다. 저장된 취약 개념은 유지됩니다.");
 });
 
 async function sendClip() {
   const clip = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-  if (clip.size < 1000) { status("Clip too short — hold the button while speaking."); return; }
+  if (clip.size < 1000) { status("녹음이 너무 짧습니다. 버튼을 누른 채 말해 주세요."); return; }
 
-  status("Thinking…");
+  status("생각하는 중…");
   $("ptt").disabled = true;
   const t0 = performance.now();
 
@@ -163,7 +157,7 @@ async function sendClip() {
     addTurn({ error: String(e) });
   } finally {
     $("ptt").disabled = false;
-    status("Hold the button to keep talking.");
+    status("계속 질문하려면 버튼을 누른 채 말하세요.");
   }
 }
 
@@ -174,16 +168,16 @@ function addTurn({ transcript, reply, tools = [], timings = {}, roundTrip, error
   div.className = "turn";
 
   if (error) {
-    div.innerHTML = `<div class="who">Server error</div><div class="err"></div>`;
+    div.innerHTML = `<div class="who">서버 오류</div><div class="err"></div>`;
     div.querySelector(".err").textContent = error;
   } else {
     div.innerHTML = `
-      <div class="who">You</div><div></div>
-      <div class="who" style="margin-top:.5rem">Agent</div><div></div>
+      <div class="who">나</div><div></div>
+      <div class="who" style="margin-top:.5rem">KINGO VOICE TA</div><div></div>
       <div class="tools"></div>
       <div class="lat"></div><div class="latlabel"></div>`;
     const texts = div.querySelectorAll("div:not([class])");
-    texts[0].textContent = transcript ?? "(no transcript)";
+    texts[0].textContent = transcript ?? "(인식된 음성 없음)";
     texts[1].textContent = reply ?? "";
 
     // Tool chips: one per call the model made this turn.
@@ -205,7 +199,7 @@ function addTurn({ transcript, reply, tools = [], timings = {}, roundTrip, error
       bar.appendChild(seg);
     }
     div.querySelector(".latlabel").textContent =
-      `STT ${stt} ms · Grok ${llm} ms · TTS ${tts} ms · round trip ${roundTrip} ms`;
+      `STT ${stt} ms · Grok ${llm} ms · TTS ${tts} ms · 전체 ${roundTrip} ms`;
   }
   $("log").prepend(div);
 }
