@@ -174,6 +174,8 @@ class ServerToolTests(unittest.TestCase):
         decision = json.dumps({
             "answer": "lecture.pdf p.3에 따르면 내적은 관련도를 측정해요.",
             "memory": None,
+            "needs_web_search": False,
+            "web_search_query": None,
         }, ensure_ascii=False)
         fake_client = FakeChatClient([
             SimpleNamespace(content=decision, tool_calls=[]),
@@ -229,6 +231,8 @@ class ServerToolTests(unittest.TestCase):
                 "original_question": "Query와 Key를 왜 곱해?",
                 "difficulty_note": "내적과 관련도의 관계가 불명확함",
             },
+            "needs_web_search": False,
+            "web_search_query": None,
         }, ensure_ascii=False)
         fake_client = FakeChatClient([
             SimpleNamespace(content=decision, tool_calls=[]),
@@ -262,7 +266,12 @@ class ServerToolTests(unittest.TestCase):
         self.assertIn("save_weak_concept", tools)
 
     def test_think_uses_web_only_when_pdf_has_no_result(self) -> None:
-        decision = json.dumps({"answer": "외부 출처 https://arxiv.org/abs/1", "memory": None})
+        decision = json.dumps({
+            "answer": "외부 출처 https://arxiv.org/abs/1",
+            "memory": None,
+            "needs_web_search": False,
+            "web_search_query": None,
+        })
         fake_client = FakeChatClient([
             SimpleNamespace(content=decision, tool_calls=[]),
         ])
@@ -296,6 +305,110 @@ class ServerToolTests(unittest.TestCase):
 
         tools = asyncio.run(scenario())
         self.assertIn("search_trusted_web", tools)
+
+    def test_explicit_confusion_is_saved_when_model_returns_no_memory(self) -> None:
+        decision = json.dumps({
+            "answer": "lecture.pdf p.3을 바탕으로 설명할게요.",
+            "memory": None,
+            "needs_web_search": False,
+            "web_search_query": None,
+        }, ensure_ascii=False)
+        fake_client = FakeChatClient([
+            SimpleNamespace(content=decision, tool_calls=[]),
+        ])
+
+        async def scenario():
+            save_mock = AsyncMock(return_value=json.dumps({"status": "saved"}))
+            with (
+                patch.object(
+                    server,
+                    "recall_weak_concepts",
+                    new=AsyncMock(return_value=json.dumps({"found": False, "memories": []})),
+                ),
+                patch.object(
+                    server,
+                    "search_course_materials",
+                    return_value=json.dumps({"found": True, "results": []}),
+                ),
+                patch.object(server, "xai_client", return_value=fake_client),
+                patch.object(server, "save_weak_concept", new=save_mock),
+            ):
+                _, tools = await server.think(
+                    "Self-Attention에서 Query와 Key를 왜 곱하는지 전혀 모르겠어. 이 개념이 어려워.",
+                    server.StageTimer(),
+                )
+                await asyncio.sleep(0)
+                save_mock.assert_awaited_once()
+                return tools, save_mock.await_args.kwargs
+
+        tools, saved = asyncio.run(scenario())
+        self.assertIn("save_weak_concept", tools)
+        self.assertIn("Self-Attention", saved["concept"])
+        self.assertIn("이해 부족", saved["difficulty_note"])
+
+    def test_insufficient_pdf_triggers_web_and_regenerates_answer(self) -> None:
+        first = json.dumps({
+            "answer": "강의자료에서 구체적 이유는 확인되지 않았습니다.",
+            "memory": {
+                "course": "AI 개론",
+                "concept": "Query-Key 내적",
+                "original_question": "왜 곱해?",
+                "difficulty_note": "내적의 의미가 어려움",
+            },
+            "needs_web_search": True,
+            "web_search_query": "self-attention query key dot product rationale",
+        }, ensure_ascii=False)
+        second = json.dumps({
+            "answer": "Q와 K의 내적은 두 토큰의 관련도를 점수화합니다. 외부 출처 https://arxiv.org/abs/1706.03762",
+            "memory": None,
+            "needs_web_search": False,
+            "web_search_query": None,
+        }, ensure_ascii=False)
+        fake_client = FakeChatClient([
+            SimpleNamespace(content=first, tool_calls=[]),
+            SimpleNamespace(content=second, tool_calls=[]),
+        ])
+
+        async def scenario():
+            with (
+                patch.object(
+                    server,
+                    "recall_weak_concepts",
+                    new=AsyncMock(return_value=json.dumps({"found": False, "memories": []})),
+                ),
+                patch.object(
+                    server,
+                    "search_course_materials",
+                    return_value=json.dumps({
+                        "found": True,
+                        "results": [{"source": "lecture.pdf p.10", "excerpt": "QK 가중치"}],
+                    }),
+                ),
+                patch.object(
+                    server,
+                    "search_trusted_web",
+                    return_value=json.dumps({
+                        "found": True,
+                        "answer": "내적은 compatibility function이다.",
+                        "sources": ["https://arxiv.org/abs/1706.03762"],
+                    }),
+                ) as web_mock,
+                patch.object(server, "xai_client", return_value=fake_client),
+                patch.object(server, "save_weak_concept", new=AsyncMock()),
+            ):
+                reply, tools = await server.think("Q와 K를 왜 곱해?", server.StageTimer())
+                web_mock.assert_called_once_with(
+                    "self-attention query key dot product rationale",
+                    True,
+                    "The PDF excerpts did not fully explain the student's why/how question.",
+                )
+                return reply, tools
+
+        reply, tools = asyncio.run(scenario())
+        self.assertEqual(len(fake_client.calls), 2)
+        self.assertIn("search_trusted_web", tools)
+        self.assertNotIn("확인되지 않았", reply)
+        self.assertIn("https://arxiv.org/abs/1706.03762", reply)
 
 
 class WorkerTests(unittest.TestCase):
