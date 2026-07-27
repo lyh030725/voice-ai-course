@@ -1,28 +1,27 @@
-"""Optional local worker for saved weak concepts.
+"""Optional follow-up worker for weak concepts stored in Moss.
 
-The voice-path tools write weak concepts immediately. This worker retains the
-week-2 flag-file pattern but never exports student memory: it creates a local
-Socratic follow-up template for each new memory.
+The voice path embeds memories in a Moss session. This worker reads the same
+cloud-backed index and creates local Socratic follow-up templates.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import asyncio
 import logging
-import time
 from pathlib import Path
+
+from moss_memory import MossMemoryStore
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("worker")
 
 BASE_DIR = Path(__file__).resolve().parent
-WEAK_CONCEPTS_FILE = BASE_DIR / "memory" / "weak_concepts.jsonl"
+MOSS_MEMORY = MossMemoryStore()
 PROCESSED_FILE = BASE_DIR / "memory" / "worker-processed.txt"
 FOLLOWUP_GUIDES_DIR = BASE_DIR / "memory" / "followups"
 POLL_SECONDS = 2
-
 
 
 def build_followup_guide(memory: dict) -> str:
@@ -60,23 +59,15 @@ def mark_processed(memory_id: str) -> None:
         file.write(memory_id + "\n")
 
 
-def pending_memories() -> list[dict]:
-    if not WEAK_CONCEPTS_FILE.exists():
-        return []
+async def pending_memories() -> list[dict]:
     processed = load_processed()
-    memories = []
-    for line in WEAK_CONCEPTS_FILE.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        memory = json.loads(line)
-        if memory["id"] not in processed:
-            memories.append(memory)
-    return memories
+    memories = await MOSS_MEMORY.all_memories()
+    return [memory for memory in memories if memory["id"] not in processed]
 
 
-def process_once() -> int:
+async def process_once() -> int:
     handled = 0
-    for memory in pending_memories():
+    for memory in await pending_memories():
         log.info(
             "new weak concept: %s (%s, %s)",
             memory["id"],
@@ -93,20 +84,23 @@ def process_once() -> int:
     return handled
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="KINGO local weak-concept worker")
-    parser.add_argument("--once", action="store_true", help="drain the backlog and exit")
-    args = parser.parse_args()
-
-    if args.once:
-        n = process_once()
+async def run_worker(once: bool) -> None:
+    if once:
+        n = await process_once()
         log.info("done: %d weak concept(s) processed", n)
         return
 
-    log.info("watching %s (Ctrl-C to stop)", WEAK_CONCEPTS_FILE)
+    log.info("watching Moss index %s (Ctrl-C to stop)", MOSS_MEMORY.index_name)
     while True:
-        process_once()
-        time.sleep(POLL_SECONDS)
+        await process_once()
+        await asyncio.sleep(POLL_SECONDS)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="KINGO Moss weak-concept worker")
+    parser.add_argument("--once", action="store_true", help="drain the backlog and exit")
+    args = parser.parse_args()
+    asyncio.run(run_worker(args.once))
 
 
 if __name__ == "__main__":
