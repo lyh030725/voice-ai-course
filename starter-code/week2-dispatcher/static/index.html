@@ -32,6 +32,19 @@
   #ptt.recording { transform: scale(1.12); box-shadow: 0 0 0 12px rgba(228,87,61,.25); }
   #ptt:disabled { background: #3a3f4e; cursor: not-allowed; }
 
+  .or { color: var(--dim); font-size: .8rem; margin: 1rem 0 .6rem; }
+  #text-form { display: flex; width: 100%; max-width: 40rem; gap: .5rem; }
+  #text-input {
+    flex: 1; min-width: 0; border: 1px solid #3a3f4e; border-radius: 8px;
+    background: var(--panel); color: var(--text); padding: .7rem .8rem; font: inherit;
+  }
+  #text-input:focus { outline: 2px solid var(--llm); outline-offset: 1px; }
+  #text-send {
+    border: none; border-radius: 8px; background: var(--llm); color: white;
+    padding: .7rem 1rem; font: 600 .9rem system-ui; cursor: pointer;
+  }
+  #text-send:disabled, #text-input:disabled { opacity: .55; cursor: not-allowed; }
+
   #reset {
     margin-top: 1rem; background: none; border: 1px solid #3a3f4e; color: var(--dim);
     border-radius: 8px; padding: .35rem .9rem; font: 500 .85rem system-ui; cursor: pointer;
@@ -65,7 +78,14 @@
   <h1>KINGO VOICE TA</h1>
   <div id="status">불러오는 중…</div>
 
-  <button id="ptt" disabled>누르고<br>말하기</button>
+  <button id="ptt">누르고<br>말하기</button>
+  <div class="or">또는 텍스트로 테스트</div>
+  <form id="text-form">
+    <input id="text-input" name="text" maxlength="4000"
+      placeholder="예: Self-Attention에서 Query와 Key를 왜 곱해?"
+      aria-label="텍스트 질문">
+    <button id="text-send" type="submit">전송</button>
+  </form>
   <button id="reset" title="현재 대화 기록만 지웁니다">✕ 새 대화</button>
   <div class="key">
     지연 시간: <i style="background:var(--stt)"></i>STT
@@ -82,14 +102,21 @@ const status = (msg) => { $("status").textContent = msg; };
 
 let recorder = null;
 let chunks = [];
+let recordRequested = false;
 
-// Mic + MediaRecorder — unchanged from week 1 (localhost/HTTPS only).
-async function init() {
+function setBusy(busy) {
+  $("ptt").disabled = busy;
+  $("text-input").disabled = busy;
+  $("text-send").disabled = busy;
+}
+
+// Mic is initialized lazily so text-only testing never asks for permission.
+async function initMic() {
   let stream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    status("마이크를 사용할 수 없습니다. localhost/HTTPS와 권한을 확인하세요: " + e.message);
+    status("마이크를 사용할 수 없습니다. 텍스트 입력은 계속 사용할 수 있습니다: " + e.message);
     return;
   }
   const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
@@ -98,12 +125,13 @@ async function init() {
   recorder.ondataavailable = (e) => chunks.push(e.data);
   recorder.onstop = sendClip;
 
-  $("ptt").disabled = false;
-  status("버튼을 누른 채 학습 질문을 말하고, 끝나면 놓으세요.");
+  status("마이크가 준비됐습니다. 버튼을 누른 채 말하세요.");
 }
 
-function startRec() {
-  if (!recorder || recorder.state === "recording") return;
+async function startRec() {
+  if ($("ptt").disabled || !recordRequested) return;
+  if (!recorder) await initMic();
+  if (!recordRequested || !recorder || recorder.state === "recording") return;
   chunks = [];
   recorder.start();
   $("ptt").classList.add("recording");
@@ -114,17 +142,71 @@ function stopRec() {
   recorder.stop();
   $("ptt").classList.remove("recording");
 }
-$("ptt").addEventListener("pointerdown", (e) => { e.preventDefault(); startRec(); });
-$("ptt").addEventListener("pointerup", stopRec);
-$("ptt").addEventListener("pointerleave", stopRec);
-document.addEventListener("keydown", (e) => { if (e.code === "Space" && !e.repeat) startRec(); });
-document.addEventListener("keyup", (e) => { if (e.code === "Space") stopRec(); });
+const requestRecording = async (event) => {
+  event.preventDefault();
+  recordRequested = true;
+  await startRec();
+};
+const releaseRecording = () => {
+  recordRequested = false;
+  stopRec();
+};
+$("ptt").addEventListener("pointerdown", requestRecording);
+$("ptt").addEventListener("pointerup", releaseRecording);
+$("ptt").addEventListener("pointerleave", releaseRecording);
+const isTyping = (target) =>
+  target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable;
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !e.repeat && !isTyping(e.target)) requestRecording(e);
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "Space" && !isTyping(e.target)) releaseRecording();
+});
 
 // NEW this week: wipe the server-side conversation memory (Slide 19).
 $("reset").addEventListener("click", async () => {
   await fetch("/reset", { method: "POST" });
   $("log").innerHTML = "";
   status("새 대화를 시작합니다. 저장된 취약 개념은 유지됩니다.");
+  $("text-input").focus();
+});
+
+$("text-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const transcript = $("text-input").value.trim();
+  if (!transcript) {
+    status("텍스트 질문을 입력해 주세요.");
+    $("text-input").focus();
+    return;
+  }
+
+  setBusy(true);
+  status("텍스트 질문을 처리하는 중…");
+  const t0 = performance.now();
+  try {
+    const res = await fetch("/answer-text", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: transcript }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "텍스트 요청에 실패했습니다.");
+
+    addTurn({
+      transcript: data.transcript,
+      reply: data.reply,
+      tools: data.tools,
+      timings: data.timings,
+      roundTrip: Math.round(performance.now() - t0),
+    });
+    $("text-input").value = "";
+  } catch (e) {
+    addTurn({ error: String(e) });
+  } finally {
+    setBusy(false);
+    status("계속 질문하려면 음성 버튼을 누르거나 텍스트를 입력하세요.");
+    $("text-input").focus();
+  }
 });
 
 async function sendClip() {
@@ -132,7 +214,7 @@ async function sendClip() {
   if (clip.size < 1000) { status("녹음이 너무 짧습니다. 버튼을 누른 채 말해 주세요."); return; }
 
   status("생각하는 중…");
-  $("ptt").disabled = true;
+  setBusy(true);
   const t0 = performance.now();
 
   try {
@@ -156,8 +238,8 @@ async function sendClip() {
   } catch (e) {
     addTurn({ error: String(e) });
   } finally {
-    $("ptt").disabled = false;
-    status("계속 질문하려면 버튼을 누른 채 말하세요.");
+    setBusy(false);
+    status("계속 질문하려면 음성 버튼을 누르거나 텍스트를 입력하세요.");
   }
 }
 
@@ -180,7 +262,7 @@ function addTurn({ transcript, reply, tools = [], timings = {}, roundTrip, error
     texts[0].textContent = transcript ?? "(인식된 음성 없음)";
     texts[1].textContent = reply ?? "";
 
-    // Tool chips: one per call the model made this turn.
+    // Retrieval and persistence operations performed this turn.
     const toolsEl = div.querySelector(".tools");
     for (const t of tools) {
       const chip = document.createElement("span");
@@ -189,7 +271,7 @@ function addTurn({ transcript, reply, tools = [], timings = {}, roundTrip, error
     }
     if (!tools.length) toolsEl.remove();
 
-    const { stt = 0, llm = 0, tts = 0 } = timings;
+    const { stt = 0, llm = 0, tts = 0, recall = 0, pdf = 0, web = 0, grok = 0 } = timings;
     const other = Math.max(roundTrip - stt - llm - tts, 0);
     const bar = div.querySelector(".lat");
     for (const [cls, ms] of [["stt", stt], ["llm", llm], ["tts", tts], ["other", other]]) {
@@ -199,12 +281,13 @@ function addTurn({ transcript, reply, tools = [], timings = {}, roundTrip, error
       bar.appendChild(seg);
     }
     div.querySelector(".latlabel").textContent =
-      `STT ${stt} ms · Grok ${llm} ms · TTS ${tts} ms · 전체 ${roundTrip} ms`;
+      `STT ${stt} ms · 검색 ${Math.max(recall, pdf) + web} ms · Grok ${grok || llm} ms · TTS ${tts} ms · 전체 ${roundTrip} ms`;
   }
   $("log").prepend(div);
 }
 
-init();
+status("텍스트를 입력하거나 음성 버튼을 눌러 질문하세요.");
+$("text-input").focus();
 </script>
 </body>
 </html>
