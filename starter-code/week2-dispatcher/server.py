@@ -134,6 +134,8 @@ class WeakConceptCapture(BaseModel):
 class AgentDecision(BaseModel):
     answer: str
     memory: WeakConceptCapture | None
+    needs_web_search: bool
+    web_search_query: str | None
 
 
 HISTORY: list[dict] = []
@@ -146,10 +148,15 @@ SYSTEM_PROMPT = (
     "and course evidence. Use only that supplied evidence for factual claims. "
     "When local PDF results are used, state the PDF filename and page. When web "
     "results are used, include at least one supplied source URL and say it is an "
-    "external source. If the evidence is insufficient, say that it could not be "
-    "verified rather than guessing. Use recalled weaknesses to personalize hints. "
-    "Set memory to a concise weak-concept record for a substantive course question, "
-    "confusion, or an incorrect/incomplete explanation; otherwise set memory null."
+    "external source. Never end an answer by saying the course material does not "
+    "contain or verify an explanation when a trusted web search could answer it. "
+    "Instead set needs_web_search=true and provide a focused web_search_query. "
+    "Set needs_web_search=false after web evidence has been supplied. Use recalled "
+    "weaknesses to personalize hints. Memory capture is intentionally permissive: "
+    "memory MUST be non-null whenever the student asks a learning question, says "
+    "they do not know, are confused, find something difficult, or gives an "
+    "incorrect/incomplete explanation. Only set memory null for clearly casual or "
+    "administrative conversation."
 )
 
 
@@ -343,6 +350,28 @@ def search_trusted_web(
 # One-pass retrieval and response pipeline.
 # --------------------------------------------------------------------------
 
+CONFUSION_MARKERS = (
+    "모르겠", "모르겠어", "잘 모르", "어려워", "어렵", "헷갈",
+    "이해가 안", "이해 안", "이해되지", "감이 안", "막혀", "틀린 것 같",
+    "don't know", "do not know", "confused", "difficult", "hard to understand",
+)
+
+
+def _explicit_confusion(transcript: str) -> bool:
+    normalized = transcript.casefold()
+    return any(marker in normalized for marker in CONFUSION_MARKERS)
+
+
+def _fallback_weak_concept(transcript: str) -> WeakConceptCapture:
+    concise_question = re.sub(r"\s+", " ", transcript).strip()
+    return WeakConceptCapture(
+        course="미지정 과목",
+        concept=concise_question[:160],
+        original_question=concise_question,
+        difficulty_note="학생이 명시적으로 이해 부족, 혼란 또는 어려움을 표현함",
+    )
+
+
 def _append_history(message: dict) -> None:
     HISTORY.append(message)
     if len(HISTORY) > MAX_HISTORY_MESSAGES:
@@ -395,20 +424,24 @@ async def think(transcript: str, timer: StageTimer) -> tuple[str, list[str]]:
     memory_context, evidence = await _retrieve_context(transcript, timer)
     tools_used = ["recall_weak_concepts", "search_course_materials"]
     external_sources: list[str] = []
+    has_web_evidence = False
 
-    if evidence.get("found") is False:
+    async def add_web_evidence(query: str, reason: str) -> None:
+        nonlocal evidence, external_sources, has_web_evidence
         started_at = time.perf_counter()
         try:
             web_result = await asyncio.to_thread(
                 search_trusted_web,
-                transcript,
-                False,
-                "No relevant course PDF evidence was found.",
+                query,
+                bool(evidence.get("found")),
+                reason,
             )
             web_evidence = json.loads(web_result)
             external_sources = web_evidence.get("sources", [])
             evidence = {"course_pdf": evidence, "trusted_web": web_evidence}
-            tools_used.append("search_trusted_web")
+            has_web_evidence = web_evidence.get("found") is True
+            if "search_trusted_web" not in tools_used:
+                tools_used.append("search_trusted_web")
         except Exception as exc:
             log.exception("trusted web fallback failed")
             evidence = {
@@ -418,13 +451,15 @@ async def think(transcript: str, timer: StageTimer) -> tuple[str, list[str]]:
         finally:
             timer.record("web", started_at)
 
-    retrieval_context = _json({
-        "recalled_weak_concepts": memory_context,
-        "evidence": evidence,
-    })
+    if evidence.get("found") is False:
+        await add_web_evidence(
+            transcript,
+            "No relevant course PDF evidence was found.",
+        )
+
     client = xai_client()
 
-    def complete() -> str:
+    def complete(retrieval_context: str) -> str:
         response = client.chat.completions.create(
             model=os.environ.get("CHAT_MODEL", "grok-4.3"),
             reasoning_effort=os.environ.get("CHAT_REASONING_EFFORT", "none"),
@@ -448,16 +483,37 @@ async def think(transcript: str, timer: StageTimer) -> tuple[str, list[str]]:
         )
         return response.choices[0].message.content or ""
 
-    started_at = time.perf_counter()
-    raw_decision = await asyncio.to_thread(complete)
-    timer.record("grok", started_at)
-    decision = AgentDecision.model_validate_json(raw_decision)
+    async def generate_decision() -> AgentDecision:
+        retrieval_context = _json({
+            "recalled_weak_concepts": memory_context,
+            "evidence": evidence,
+        })
+        started_at = time.perf_counter()
+        raw_decision = await asyncio.to_thread(complete, retrieval_context)
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        timer.timings_ms["grok"] = timer.timings_ms.get("grok", 0) + elapsed_ms
+        log.info("stage grok  %5d ms", elapsed_ms)
+        return AgentDecision.model_validate_json(raw_decision)
+
+    decision = await generate_decision()
+    captured_memory = decision.memory
+    if decision.needs_web_search and not has_web_evidence:
+        await add_web_evidence(
+            decision.web_search_query or transcript,
+            "The PDF excerpts did not fully explain the student's why/how question.",
+        )
+        decision = await generate_decision()
+
     reply_text = decision.answer.strip() or "답변을 생성하지 못했어요. 다시 질문해 주세요."
     if external_sources and not any(url in reply_text for url in external_sources):
         reply_text += " 외부 출처: " + ", ".join(external_sources[:3])
 
-    if decision.memory is not None:
-        _schedule_memory_save(decision.memory)
+    memory = decision.memory or captured_memory
+    if memory is None and _explicit_confusion(transcript):
+        memory = _fallback_weak_concept(transcript)
+        log.info("explicit confusion detected; using fallback weak-concept capture")
+    if memory is not None:
+        _schedule_memory_save(memory)
         tools_used.append("save_weak_concept")
 
     _append_history({"role": "assistant", "content": reply_text})
