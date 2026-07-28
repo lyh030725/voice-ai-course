@@ -112,12 +112,12 @@ class MossMemoryStore:
                 self.model_id,
             )
 
-    def _memory_id(self, concept: str, original_question: str) -> str:
+    def _memory_id(self, course: str, concept: str) -> str:
         canonical = "\0".join(
             (
                 self.student_id.casefold(),
+                course.strip().casefold(),
                 concept.strip().casefold(),
-                original_question.strip().casefold(),
             )
         )
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
@@ -163,15 +163,33 @@ class MossMemoryStore:
             return {"error": "all weak-concept fields are required"}
 
         await self.initialize()
-        memory_id = self._memory_id(fields["concept"], fields["original_question"])
+        memory_id = self._memory_id(fields["course"], fields["concept"])
+        now = time.time()
         async with self._operation_lock:
             existing = await self._session.get_docs(
                 self._sdk.GetDocumentsOptions(doc_ids=[memory_id])
             )
             if existing:
+                memory = self._memory_from_doc(existing[0]) or {}
+                memory.update(
+                    {
+                        "id": memory_id,
+                        "student_id": self.student_id,
+                        **fields,
+                        "status": "practicing",
+                        "confidence": max(float(memory.get("confidence", 0)) - 0.2, 0),
+                        "failure_count": int(memory.get("failure_count", 0)) + 1,
+                        "success_count": 0,
+                        "last_seen_at": now,
+                        "next_review_at": now + 86400,
+                    }
+                )
+                await self._session.add_docs([self._document(memory)])
+                self._dirty = True
+                self._schedule_push()
                 return {
                     "memory_id": memory_id,
-                    "status": "already_saved",
+                    "status": "updated",
                     "concept": fields["concept"],
                 }
 
@@ -179,19 +197,15 @@ class MossMemoryStore:
                 "id": memory_id,
                 "student_id": self.student_id,
                 **fields,
-                "saved_at": time.time(),
+                "status": "new",
+                "confidence": 0.0,
+                "failure_count": 1,
+                "success_count": 0,
+                "saved_at": now,
+                "last_seen_at": now,
+                "next_review_at": now + 86400,
             }
-            document = self._sdk.DocumentInfo(
-                id=memory_id,
-                text=self._searchable_text(memory),
-                metadata={
-                    "student_id": self.student_id,
-                    "course": fields["course"],
-                    "concept": fields["concept"],
-                },
-                payload=json.dumps(memory, ensure_ascii=False),
-            )
-            await self._session.add_docs([document])
+            await self._session.add_docs([self._document(memory)])
             self._dirty = True
 
         self._schedule_push()
@@ -201,6 +215,59 @@ class MossMemoryStore:
             "status": "saved",
             "concept": fields["concept"],
         }
+
+    def _document(self, memory: dict[str, Any]) -> Any:
+        return self._sdk.DocumentInfo(
+            id=memory["id"],
+            text=self._searchable_text(memory),
+            metadata={
+                "student_id": self.student_id,
+                "course": memory["course"],
+                "concept": memory["concept"],
+            },
+            payload=json.dumps(memory, ensure_ascii=False),
+        )
+
+    async def review(self, memory_id: str, correct: bool) -> dict[str, Any]:
+        """Update spaced-repetition state after one recalled concept is assessed."""
+        await self.initialize()
+        now = time.time()
+        async with self._operation_lock:
+            docs = await self._session.get_docs(
+                self._sdk.GetDocumentsOptions(doc_ids=[memory_id])
+            )
+            if not docs or not (memory := self._memory_from_doc(docs[0])):
+                return {"error": "weak concept not found", "memory_id": memory_id}
+
+            successes = int(memory.get("success_count", 0)) + 1 if correct else 0
+            failures = int(memory.get("failure_count", 0)) + (not correct)
+            delays = (1, 3, 7, 30)
+            memory.update(
+                {
+                    "status": "mastered" if successes >= 3 else "practicing",
+                    "confidence": min(successes / 3, 1.0),
+                    "success_count": successes,
+                    "failure_count": failures,
+                    "last_seen_at": now,
+                    "next_review_at": now + delays[min(successes, 3)] * 86400,
+                }
+            )
+            await self._session.add_docs([self._document(memory)])
+            self._dirty = True
+
+        self._schedule_push()
+        return {"memory_id": memory_id, "status": memory["status"], "correct": correct}
+
+    async def next_review(self) -> dict[str, Any] | None:
+        """Return oldest due, unmastered concept."""
+        now = time.time()
+        due = [
+            memory
+            for memory in await self.all_memories()
+            if memory.get("status") != "mastered"
+            and float(memory.get("next_review_at", 0)) <= now
+        ]
+        return min(due, key=lambda memory: memory.get("next_review_at", 0), default=None)
 
     async def recall(self, topic: str, *, top_k: int = 5) -> dict[str, Any]:
         topic = topic.strip()
@@ -232,6 +299,11 @@ class MossMemoryStore:
                     "concept": memory["concept"],
                     "original_question": memory["original_question"],
                     "difficulty_note": memory["difficulty_note"],
+                    "status": memory.get("status", "new"),
+                    "confidence": memory.get("confidence", 0),
+                    "failure_count": memory.get("failure_count", 1),
+                    "success_count": memory.get("success_count", 0),
+                    "next_review_at": memory.get("next_review_at", 0),
                 }
                 for memory in memories
             ],
