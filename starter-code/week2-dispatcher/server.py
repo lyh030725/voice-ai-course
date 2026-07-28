@@ -131,9 +131,15 @@ class WeakConceptCapture(BaseModel):
     difficulty_note: str
 
 
+class WeakConceptReview(BaseModel):
+    memory_id: str
+    correct: bool
+
+
 class AgentDecision(BaseModel):
     answer: str
     memory: WeakConceptCapture | None
+    review: WeakConceptReview | None
     needs_web_search: bool
     web_search_query: str | None
 
@@ -152,11 +158,13 @@ SYSTEM_PROMPT = (
     "contain or verify an explanation when a trusted web search could answer it. "
     "Instead set needs_web_search=true and provide a focused web_search_query. "
     "Set needs_web_search=false after web evidence has been supplied. Use recalled "
-    "weaknesses to personalize hints. Memory capture is intentionally permissive: "
-    "memory MUST be non-null whenever the student asks a learning question, says "
-    "they do not know, are confused, find something difficult, or gives an "
-    "incorrect/incomplete explanation. Only set memory null for clearly casual or "
-    "administrative conversation."
+    "weaknesses to personalize hints. If a weakness repeats, check a prerequisite "
+    "before repeating the same explanation. Set memory only when the student says "
+    "they are confused, gives an incorrect/incomplete explanation, or clearly fails "
+    "to understand; ordinary learning questions are not weaknesses. Set review to "
+    "the recalled memory_id and whether the student's explanation is correct when "
+    "their message answers a recall question; otherwise set review=null. When review "
+    "is non-null, set memory=null because review already updates that weakness."
 )
 
 
@@ -394,6 +402,12 @@ def _schedule_memory_save(memory: WeakConceptCapture) -> None:
     task.add_done_callback(_background_done)
 
 
+def _schedule_memory_review(review: WeakConceptReview) -> None:
+    task = asyncio.create_task(MOSS_MEMORY.review(review.memory_id, review.correct))
+    BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_background_done)
+
+
 async def _retrieve_context(transcript: str, timer: StageTimer) -> tuple[dict, dict]:
     async def recall() -> dict:
         started_at = time.perf_counter()
@@ -515,6 +529,9 @@ async def think(transcript: str, timer: StageTimer) -> tuple[str, list[str]]:
     if memory is not None:
         _schedule_memory_save(memory)
         tools_used.append("save_weak_concept")
+    if decision.review is not None:
+        _schedule_memory_review(decision.review)
+        tools_used.append("review_weak_concept")
 
     _append_history({"role": "assistant", "content": reply_text})
     return reply_text, tools_used
@@ -626,6 +643,26 @@ async def reset() -> dict:
     HISTORY.clear()
     log.info("conversation reset")
     return {"ok": True}
+
+
+@app.get("/review")
+async def review_prompt() -> dict:
+    if not MOSS_MEMORY.is_configured:
+        return {"due": False}
+    memory = await MOSS_MEMORY.next_review()
+    if memory is None:
+        return {"due": False}
+    question = f"{memory['concept']}을 자신의 말로 설명해 볼까요?"
+    _append_history({
+        "role": "assistant",
+        "content": f"복습 질문 (memory_id={memory['id']}): {question}",
+    })
+    return {
+        "due": True,
+        "memory_id": memory["id"],
+        "concept": memory["concept"],
+        "question": question,
+    }
 
 
 app.mount("/", StaticFiles(directory=BASE_DIR / "static", html=True), name="static")

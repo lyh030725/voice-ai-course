@@ -168,8 +168,18 @@ $("reset").addEventListener("click", async () => {
   await fetch("/reset", { method: "POST" });
   $("log").innerHTML = "";
   status("새 대화를 시작합니다. 저장된 취약 개념은 유지됩니다.");
+  await showReview();
   $("text-input").focus();
 });
+
+async function showReview() {
+  try {
+    const res = await fetch("/review");
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.due) addTurn({ transcript: "복습", reply: data.question, tools: ["recall_weak_concepts"], roundTrip: 0 });
+  } catch (_) {}
+}
 
 $("text-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -287,6 +297,7 @@ function addTurn({ transcript, reply, tools = [], timings = {}, roundTrip, error
 }
 
 status("텍스트를 입력하거나 음성 버튼을 눌러 질문하세요.");
+showReview();
 $("text-input").focus();
 </script>
 </body>

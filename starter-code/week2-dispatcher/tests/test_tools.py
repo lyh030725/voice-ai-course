@@ -174,6 +174,7 @@ class ServerToolTests(unittest.TestCase):
         decision = json.dumps({
             "answer": "lecture.pdf p.3에 따르면 내적은 관련도를 측정해요.",
             "memory": None,
+            "review": None,
             "needs_web_search": False,
             "web_search_query": None,
         }, ensure_ascii=False)
@@ -231,6 +232,7 @@ class ServerToolTests(unittest.TestCase):
                 "original_question": "Query와 Key를 왜 곱해?",
                 "difficulty_note": "내적과 관련도의 관계가 불명확함",
             },
+            "review": None,
             "needs_web_search": False,
             "web_search_query": None,
         }, ensure_ascii=False)
@@ -269,6 +271,7 @@ class ServerToolTests(unittest.TestCase):
         decision = json.dumps({
             "answer": "외부 출처 https://arxiv.org/abs/1",
             "memory": None,
+            "review": None,
             "needs_web_search": False,
             "web_search_query": None,
         })
@@ -310,6 +313,7 @@ class ServerToolTests(unittest.TestCase):
         decision = json.dumps({
             "answer": "lecture.pdf p.3을 바탕으로 설명할게요.",
             "memory": None,
+            "review": None,
             "needs_web_search": False,
             "web_search_query": None,
         }, ensure_ascii=False)
@@ -355,12 +359,14 @@ class ServerToolTests(unittest.TestCase):
                 "original_question": "왜 곱해?",
                 "difficulty_note": "내적의 의미가 어려움",
             },
+            "review": None,
             "needs_web_search": True,
             "web_search_query": "self-attention query key dot product rationale",
         }, ensure_ascii=False)
         second = json.dumps({
             "answer": "Q와 K의 내적은 두 토큰의 관련도를 점수화합니다. 외부 출처 https://arxiv.org/abs/1706.03762",
             "memory": None,
+            "review": None,
             "needs_web_search": False,
             "web_search_query": None,
         }, ensure_ascii=False)

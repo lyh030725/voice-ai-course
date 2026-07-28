@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from types import SimpleNamespace
 import unittest
@@ -119,12 +120,25 @@ class MossMemoryStoreTests(unittest.TestCase):
                 "중복 저장되지 않아야 함",
             )
             recalled = await store.recall("attention 유사도")
+            stored = session.documents[first["memory_id"]]
+            payload = json.loads(stored.payload)
+            payload["next_review_at"] = 0
+            stored.payload = json.dumps(payload)
+            due = await store.next_review()
+            failed = await store.review(first["memory_id"], False)
+            await store.review(first["memory_id"], True)
+            await store.review(first["memory_id"], True)
+            mastered = await store.review(first["memory_id"], True)
             await store.flush()
 
             self.assertEqual(first["status"], "saved")
-            self.assertEqual(duplicate["status"], "already_saved")
+            self.assertEqual(duplicate["status"], "updated")
             self.assertEqual(len(session.documents), 1)
             self.assertEqual(recalled["memories"][0]["memory_id"], first["memory_id"] )
+            self.assertEqual(recalled["memories"][0]["failure_count"], 2)
+            self.assertFalse(failed["correct"])
+            self.assertEqual(due["id"], first["memory_id"])
+            self.assertEqual(mastered["status"], "mastered")
             self.assertEqual(clients[0].session_args, ("student-memory", "moss-minilm"))
             self.assertEqual(session.last_query[0], "attention 유사도")
             self.assertEqual(session.last_query[1].alpha, 0.85)
