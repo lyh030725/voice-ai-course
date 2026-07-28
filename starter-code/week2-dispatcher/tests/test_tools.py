@@ -142,6 +142,13 @@ class ServerToolTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.status_code, 422)
 
+    def test_speech_omits_external_sources(self) -> None:
+        reply = (
+            "Q와 K의 내적은 관련도를 측정합니다. 외부 출처: "
+            "https://arxiv.org/abs/1706.03762, https://example.org/paper"
+        )
+        self.assertEqual(server._for_speech(reply), "Q와 K의 내적은 관련도를 측정합니다.")
+
     def test_pdf_search_returns_filename_and_page(self) -> None:
         server.PDF_PAGE_CACHE = [
             {"file": "lecture.pdf", "page": 3, "text": "Query와 Key의 내적은 토큰 유사도를 계산한다."},

@@ -541,6 +541,15 @@ async def think(transcript: str, timer: StageTimer) -> tuple[str, list[str]]:
 # Provided: the cascade (native xAI STT/TTS, Grok chat via the SDK).
 # --------------------------------------------------------------------------
 
+def _for_speech(text: str) -> str:
+    """Keep citations on screen without reading source URLs aloud."""
+    text = re.sub(
+        r"\s*외부 출처\s*:?\s*(?:https?://\S+\s*,?\s*)+$", "", text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"https?://\S+", "", text).strip()
+
+
 async def answer(audio: bytes, mime: str, timer: StageTimer) -> AgentReply:
     api_key = require_env("XAI_API_KEY")
 
@@ -566,7 +575,7 @@ async def answer(audio: bytes, mime: str, timer: StageTimer) -> AgentReply:
                 "Content-Type": "application/json",
             },
             json={
-                "text": reply_text,
+                "text": _for_speech(reply_text),
                 "voice_id": require_env("TTS_VOICE"),
                 "language": "auto",
             },
